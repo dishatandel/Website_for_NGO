@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Member Dashboard - Rotary Club of Honavar</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f7f7;
+        }
+        .status-pill { padding: 4px 10px; border-radius: 9999px; font-weight: 600; font-size: 0.8rem; }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <!-- Main Dashboard Container -->
+    <div id="member-dashboard" class="min-h-screen">
+        <!-- Header -->
+        <header class="bg-white shadow-md sticky top-0 z-10">
+            <div class="container mx-auto px-6 py-4 flex items-center justify-between">
+                <h1 class="text-2xl font-bold text-gray-800">Welcome, <span id="member-name">Member</span></h1>
+                <div class="flex items-center space-x-4">
+                    <a href="index.html" class="text-sm text-gray-500 hover:text-blue-600">Home</a>
+                    <button id="member-logout-btn" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition duration-200 text-sm">
+                        Logout
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <div class="container mx-auto px-6 py-8">
+            <h2 class="text-3xl font-bold text-gray-700 mb-8">My Tracking & Status</h2>
+            
+            <!-- Membership Status Card (FEAT: Expiry Date) -->
+            <div class="bg-white p-6 rounded-lg shadow-xl mb-8">
+                <div class="flex items-center justify-between border-b pb-3 mb-4">
+                    <h3 class="text-xl font-semibold text-gray-800">Membership Status & Expiry</h3>
+                    <p id="membership-date" class="text-sm text-gray-500"></p>
+                </div>
+                <div id="membership-status-content" class="text-gray-700">
+                    <div class="flex items-center justify-center p-6 text-gray-500">Loading Status...</div>
+                </div>
+            </div>
+
+            <!-- Assigned Tasks (FEAT: Assigned Work) -->
+            <div class="bg-white p-6 rounded-lg shadow-xl mb-8">
+                <h3 class="text-xl font-semibold text-gray-800 border-b pb-3 mb-4">Assigned Work & Tasks</h3>
+                <div id="assigned-tasks-list" class="space-y-4">
+                    <p class="text-gray-500 text-center py-8">Loading tasks...</p>
+                </div>
+            </div>
+            
+            <!-- Service Requests Tracking (For pending members/tracking users) -->
+            <div class="bg-white p-6 rounded-lg shadow-xl mb-8">
+                <h3 class="text-xl font-semibold text-gray-800 border-b pb-3 mb-4">My Submitted Service Requests</h3>
+                <div id="service-requests-tracking" class="space-y-4">
+                    <p class="text-gray-500 text-center py-8">Loading requests...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:5000/api';
+        let authToken = localStorage.getItem('memberAuthToken');
+        let memberEmail = localStorage.getItem('memberUserEmail');
+        let memberName = 'Member';
+
+        // --- Core Authentication Check ---
+        if (!authToken || !memberEmail) {
+            window.location.href = 'index.html'; // Send them back if not logged in
+        }
+
+        // --- Utility Functions ---
+        
+        const apiFetch = async (url, options = {}) => {
+            options.headers = options.headers || {};
+            if (authToken) {
+                options.headers['Authorization'] = `Bearer ${authToken}`;
+            }
+            const response = await fetch(url, options);
+            
+            if (response.status === 401 || response.status === 403) {
+                memberLogout();
+                throw new Error('Session expired or access denied.');
+            }
+            return response;
+        };
+        
+        function formatDate(dateString) {
+            const options = { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+            return new Date(dateString).toLocaleDateString('en-US', options);
+        }
+
+        function getStatusPill(status) {
+            switch(status) {
+                case 'approved':
+                case 'member': 
+                    return `<span class="status-pill bg-green-100 text-green-700">APPROVED MEMBER</span>`;
+                case 'rejected':
+                    return `<span class="status-pill bg-red-100 text-red-700">REJECTED</span>`;
+                case 'under review':
+                    return `<span class="status-pill bg-yellow-100 text-yellow-700">UNDER REVIEW</span>`;
+                case 'action taken':
+                    return `<span class="status-pill bg-blue-100 text-blue-700">ACTION TAKEN</span>`;
+                case 'new':
+                case 'pending':
+                default:
+                    return `<span class="status-pill bg-gray-100 text-gray-700">PENDING</span>`;
+            }
+        }
+
+        // --- Data Loading ---
+
+        async function loadMemberData() {
+            try {
+                // 1. Get user details (including new fields: membershipEndDate, tasks)
+                const userResponse = await apiFetch(`${API_URL}/auth/me`);
+                const user = await userResponse.json();
+                
+                // Safety check to prevent errors if user object is malformed
+                if (!user || user.role === 'admin') {
+                     memberLogout();
+                     return;
+                }
+                
+                memberName = user.name;
+                document.getElementById('member-name').textContent = user.name.split(' ')[0]; 
+
+                // 2. Load Membership Status and Expiry
+                await loadMembershipStatus(user);
+                
+                // 3. Load Assigned Tasks (Only if they are an approved member)
+                if (user.role === 'member') {
+                     await loadAssignedTasks(user.tasks || []);
+                } else {
+                     document.getElementById('assigned-tasks-list').innerHTML = `
+                         <div class="bg-gray-100 p-4 rounded-lg text-center text-gray-600">
+                             Assigned tasks are visible once your membership application is approved.
+                         </div>
+                     `;
+                }
+
+                // 4. Load Service Requests Tracking (for pending/general tracking)
+                await loadServiceRequestsTracking(memberEmail);
+
+            } catch (error) {
+                console.error('Error loading member data:', error);
+                memberLogout(); 
+            }
+        }
+
+        async function loadMembershipStatus(user) {
+            const container = document.getElementById('membership-status-content');
+            const dateDisplay = document.getElementById('membership-date');
+            const userRole = user.role;
+            const assignedTasksCard = document.getElementById('assigned-tasks-list').closest('.bg-white');
+
+            if (userRole === 'member' && user.membershipEndDate) {
+                const expiryDate = new Date(user.membershipEndDate);
+                const now = new Date();
+                const diffTime = expiryDate - now;
+                const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+                let expiryMessage;
+                if (diffDays > 0) {
+                    expiryMessage = `Expires in ${diffDays} days (${expiryDate.toLocaleDateString()})`;
+                    container.innerHTML = `
+                        <div class="flex flex-col md:flex-row items-center justify-between p-4 space-y-3 md:space-y-0">
+                            <p class="text-xl font-bold text-green-600">Status: ${getStatusPill('member')}</p>
+                            <p class="text-base font-semibold text-gray-700">${expiryMessage}</p>
+                        </div>
+                    `;
+                    if (assignedTasksCard) assignedTasksCard.classList.remove('opacity-50');
+                } else {
+                    expiryMessage = `Membership expired on ${expiryDate.toLocaleDateString()}. Please renew.`;
+                    container.innerHTML = `
+                        <div class="p-4 bg-red-50 rounded-lg">
+                            <p class="text-xl font-bold text-red-600">Status: EXPIRED</p>
+                            <p class="text-base text-red-700 mt-1">${expiryMessage}</p>
+                        </div>
+                    `;
+                    if (assignedTasksCard) assignedTasksCard.classList.add('opacity-50');
+                }
+                dateDisplay.textContent = `Valid through: ${expiryDate.toLocaleDateString()}`;
+                return;
+            } 
+            
+            // If not a full member (role is pending), check for pending application status
+            if (userRole === 'pending') {
+                try {
+                    const response = await apiFetch(`${API_URL}/membership`); 
+                    const allMemberships = await response.json();
+                    
+                    if (!Array.isArray(allMemberships)) throw new Error('API returned non-array data');
+
+                    const myApplication = allMemberships
+                        .filter(app => app.email.toLowerCase() === memberEmail.toLowerCase())
+                        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0]; 
+
+                    if (myApplication) {
+                        dateDisplay.textContent = `Application Submitted: ${formatDate(myApplication.createdAt)}`;
+                        container.innerHTML = `
+                            <div class="p-4 bg-yellow-50 rounded-lg">
+                                <p class="text-xl font-bold text-yellow-700">Status: ${getStatusPill(myApplication.status)}</p>
+                                <p class="text-sm text-gray-600 mt-1">
+                                    ${myApplication.status === 'pending' ? 'Your application is currently being reviewed by the club board. You will gain full access upon approval.' : 
+                                      myApplication.status === 'rejected' ? 'Your application was rejected. Please contact the club secretary for more details.' : 
+                                      'Error: Check Admin settings.'}
+                                </p>
+                            </div>
+                        `;
+                    } else {
+                        container.innerHTML = `<p class="text-center p-4 text-gray-500">No active membership record or pending application found.</p>`;
+                    }
+
+                } catch (error) {
+                    container.innerHTML = `<p class="text-center p-4 text-red-500">Failed to load membership status.</p>`;
+                }
+            }
+        }
+
+        async function loadAssignedTasks(tasks) {
+            const container = document.getElementById('assigned-tasks-list');
+            
+            if (!tasks || tasks.length === 0) {
+                container.innerHTML = `
+                    <div class="bg-green-50 p-4 rounded-lg text-center">
+                        <p class="text-green-700 font-semibold">You currently have no tasks assigned by the Rotary Club leadership.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = tasks.map((task, index) => `
+                <div class="bg-white p-4 rounded-lg border-l-4 ${task.completed ? 'border-green-400 opacity-70' : 'border-blue-500'} shadow-sm flex justify-between items-center">
+                    <div>
+                        <h4 class="font-bold text-lg">${task.title}</h4>
+                        <p class="text-sm text-gray-600">${task.project}</p>
+                        <p class="text-xs text-gray-500 mt-1">Due: ${task.dueDate || 'N/A'}</p>
+                    </div>
+                    <span class="px-3 py-1 rounded-full text-xs font-medium ${task.completed ? 'bg-green-200 text-green-800' : 'bg-red-200 text-red-800'}">
+                        ${task.completed ? 'COMPLETED' : 'PENDING'}
+                    </span>
+                </div>
+            `).join('');
+        }
+
+        async function loadServiceRequestsTracking(email) {
+            const container = document.getElementById('service-requests-tracking');
+            container.innerHTML = '<p class="text-gray-500 text-center py-4">Loading requests...</p>';
+
+            try {
+                const response = await apiFetch(`${API_URL}/servicerequests`);
+                const allRequests = await response.json();
+                
+                if (!Array.isArray(allRequests)) {
+                     container.innerHTML = `<p class="text-center p-4 text-red-500">Error fetching requests from API.</p>`;
+                     return;
+                }
+
+                // Filter requests to show only those submitted by the logged-in user
+                const myRequests = allRequests.filter(req => req.email.toLowerCase() === email.toLowerCase());
+
+                if (myRequests.length === 0) {
+                    container.innerHTML = `<p class="text-center p-4">You have not submitted any service requests yet.</p>`;
+                    return;
+                }
+
+                container.innerHTML = myRequests.map(req => `
+                    <div class="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                        <div class="flex justify-between items-start mb-2">
+                            <div class="flex-1">
+                                <h4 class="font-bold text-base text-gray-800">Issue: ${req.issue.substring(0, 100)}${req.issue.length > 100 ? '...' : ''}</h4>
+                                <p class="text-sm text-gray-600">📍 Location: ${req.location}</p>
+                            </div>
+                            <div class="ml-4 flex-shrink-0">
+                                ${getStatusPill(req.status)}
+                            </div>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-2">Submitted on: ${formatDate(req.createdAt)}</p>
+                        <p class="text-sm mt-2 p-2 bg-white rounded-md">
+                            **Current Status:** The request is currently **${req.status.toUpperCase()}**.
+                        </p>
+                    </div>
+                `).join('');
+            } catch (error) {
+                container.innerHTML = `<p class="text-center p-4 text-red-500">Failed to load service requests.</p>`;
+                console.error('Service request load error:', error);
+            }
+        }
+
+        // --- Logout Logic ---
+
+        document.getElementById('member-logout-btn').addEventListener('click', memberLogout);
+
+        function memberLogout() {
+            localStorage.removeItem('memberAuthToken');
+            localStorage.removeItem('memberUserEmail');
+            window.location.href = 'index.html';
+        }
+
+        // Start loading data on page load
+        window.addEventListener('DOMContentLoaded', loadMemberData);
+    </script>
+</body>
+</html>
